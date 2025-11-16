@@ -62,7 +62,8 @@ def call_llm(messages: list[dict], model: str = "gpt-oss") -> str:
         response = ollama.chat(
             model=model,
             messages=messages,
-            stream=False
+            stream=False,
+            think=False
         )
         content = response["message"]["content"]
         logger.debug(f"LLM response: {len(content)} chars")
