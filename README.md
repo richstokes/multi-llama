@@ -4,10 +4,16 @@ A minimal but working multi-agent LLM orchestrator in Python, powered by Ollama.
 
 ## Overview
 
-Brainwave implements a small multi-agent system with:
-- **One coordinator agent** (the "brain") that plans and aggregates
-- **Two worker agents** (specialists) that execute tasks
+Brainwave implements an intelligent multi-agent system with:
+- **One coordinator agent** (the "brain") that:
+  - Dynamically defines specialized worker agents (up to 5) tailored to each task
+  - Plans and delegates subtasks
+  - Evaluates results for quality
+  - Iterates to improve results (up to 5 iterations)
+  - Aggregates final answers
+- **Dynamic worker agents** (specialists) created on-demand with custom capabilities
 - **In-memory task graph** with dependency tracking
+- **Iterative self-improvement** - the system refines its output until satisfactory
 - **Simple CLI** to run tasks from user prompts
 
 ## Architecture
@@ -30,15 +36,27 @@ Brainwave implements a small multi-agent system with:
 
 3. **Agent System**
    - `Agent`: Base class with system prompt and execution logic
-   - `coordinator`: Plans subtasks and aggregates results (outputs JSON)
-   - `research_worker`: Analyzes and researches topics
-   - `writer_worker`: Writes polished final answers
+   - `coordinator`: Central intelligence that:
+     - Defines specialized workers for each task
+     - Plans subtasks and delegates work
+     - Evaluates result quality
+     - Iterates to improve results
+   - **Dynamic workers**: Created on-demand with custom:
+     - Names (e.g., `kid_explainer`, `HaikuCraftsman`, `code_analyst`)
+     - Roles and expertise areas
+     - System prompts tailored to the specific task
 
 4. **Orchestrator Loop**
    - Creates root task from user prompt
-   - Coordinator plans subtasks via LLM
-   - Executes tasks when dependencies are satisfied
-   - Coordinator aggregates results into final answer
+   - **Iteration loop** (up to 5 iterations):
+     - Coordinator analyzes task and defines specialized workers
+     - Creates dynamic worker agents
+     - Plans subtasks for defined workers
+     - Executes tasks when dependencies are satisfied
+     - Aggregates results
+     - **Evaluates result quality**
+     - If unsatisfactory: defines new workers and iterates
+     - If satisfactory: returns final answer
 
 ### Task Flow
 
@@ -47,15 +65,27 @@ User Prompt
     ↓
 Root Task (coordinator)
     ↓
-[Planning Phase]
-    ↓
-Subtask 1 (research_worker) ──→ Subtask 2 (writer_worker)
-    ↓                                    ↓
- [Execution Phase]              [Execution Phase]
-    ↓                                    ↓
-  DONE                                 DONE
-    ↓
-[Aggregation Phase]
+╔═══════════════════ ITERATION LOOP (max 5) ═══════════════════╗
+║  [Worker Definition Phase]                                     ║
+║  Coordinator analyzes task → Defines 1-5 specialized workers  ║
+║    ↓                                                           ║
+║  [Dynamic Agent Creation]                                      ║
+║  Create workers: kid_explainer, phd_explainer, etc.           ║
+║    ↓                                                           ║
+║  [Planning Phase]                                              ║
+║  Coordinator plans subtasks for workers                        ║
+║    ↓                                                           ║
+║  [Execution Phase]                                             ║
+║  Worker 1 → Worker 2 → Worker 3 (with dependencies)          ║
+║    ↓                                                           ║
+║  [Aggregation Phase]                                           ║
+║  Coordinator synthesizes results                               ║
+║    ↓                                                           ║
+║  [Evaluation Phase]                                            ║
+║  Is result satisfactory?                                       ║
+║    ├─ YES → Return final answer                               ║
+║    └─ NO  → Define new workers, iterate again                 ║
+╚════════════════════════════════════════════════════════════════╝
     ↓
 Final Answer
 ```
@@ -93,16 +123,32 @@ uv run python app.py "Explain how photosynthesis works in 3 key steps"
 ### Output
 
 The orchestrator will:
-1. Log planning and execution steps
-2. Show agent activity in real-time
-3. Print the final aggregated answer
+1. Show iteration progress (ITERATION 1/5, 2/5, etc.)
+2. Log worker definition and creation
+3. Show task planning and execution in real-time
+4. Display evaluation results (✓ Satisfactory or ✗ Needs improvement)
+5. Print the final aggregated answer
 
 ```
-08:32:35 | INFO     | Starting orchestration for: 'Explain...'
-08:32:35 | INFO     | Coordinator planning subtasks for root task: 203e25e3
-08:32:55 | INFO     | Created subtask: Task(a4fee468, research_worker, PENDING...)
-08:32:55 | INFO     | Created subtask: Task(eb21d730, writer_worker, PENDING...)
+================================================================================
+ITERATION 1/5
+================================================================================
+
+Coordinator defining worker agents
+Defined 3 workers: ['kid_explainer', 'college_explainer', 'phd_explainer']
+Created agent: kid_explainer - Explains complex topics to children
+Created agent: college_explainer - Explains to college level
+Created agent: phd_explainer - Explains at PhD level
+Planned 3 subtasks
+Agent 'kid_explainer' executing task: a2b6ba01
+Task a2b6ba01 completed successfully
 ...
+Coordinator aggregating 3 subtask results
+Coordinator evaluating result quality
+Evaluation: ✓ Satisfactory
+
+✅ Result satisfactory after 1 iteration(s)
+
 ================================================================================
 FINAL ANSWER
 ================================================================================
@@ -129,41 +175,80 @@ logger.add(sys.stderr, level="DEBUG", format="...")
 
 Options: `DEBUG`, `INFO`, `WARNING`, `ERROR`
 
-### Add More Agents
+### Customize Coordinator Behavior
 
-1. Create an agent factory function:
+You can adjust the coordinator's decision-making by modifying its system prompt in `create_coordinator_agent()`. For example:
+
+- **Change worker limit**: Modify "up to 5" workers to a different number
+- **Add domain expertise**: Include specific domain knowledge in the prompt
+- **Adjust evaluation criteria**: Change what the coordinator considers "satisfactory"
+- **Modify iteration strategy**: Guide how the coordinator improves results
+
+### Adjust Iteration Limits
+
+In `run_orchestration()`:
 
 ```python
-def create_my_worker() -> Agent:
-    system_prompt = """You are a specialist in..."""
-    return Agent(name="my_worker", system_prompt=system_prompt)
+max_main_iterations = 5  # Change this to adjust max iterations
 ```
 
-2. Register it in `run_orchestration()`:
-
 ```python
-agents = {
-    "coordinator": create_coordinator_agent(),
-    "research_worker": create_research_worker(),
-    "writer_worker": create_writer_worker(),
-    "my_worker": create_my_worker()  # Add this
+max_exec_iterations = 50  # Change this for task execution safety limit
+```
+
+## Implementation Details
+
+### Dynamic Worker Creation
+
+The coordinator analyzes each task and defines workers with:
+- **Custom names**: Descriptive names like `HaikuCraftsman`, `CodeReviewer`, `DataAnalyst`
+- **Specific roles**: Tailored to the exact needs of the task
+- **Optimized prompts**: Each worker gets a system prompt designed for its specialty
+
+Example worker definition:
+```json
+{
+  "workers": [
+    {
+      "name": "kid_explainer",
+      "role": "Explains complex topics to 5-year-olds",
+      "system_prompt": "You are an expert at explaining complex topics to young children..."
+    }
+  ]
 }
 ```
 
-3. Update the coordinator's system prompt to know about it
+### Iterative Evaluation
 
-## Implementation Details
+After each iteration, the coordinator:
+1. Reviews the aggregated result
+2. Compares it against the original user request
+3. Outputs evaluation JSON:
+   ```json
+   {
+     "satisfactory": false,
+     "reasoning": "Missing technical depth in PhD explanation",
+     "improvements_needed": "Add quantum mechanics equations and Bell inequality discussion"
+   }
+   ```
+4. If unsatisfactory and iterations remain:
+   - Defines new/different workers based on feedback
+   - Re-plans with the previous result as context
+   - Executes another iteration
 
 ### Error Handling
 
 - **JSON Parse Errors**: Automatically retries once with a "fix this JSON" instruction
 - **Task Failures**: Captured and logged, with status set to `FAILED`
 - **LLM Errors**: Logged with clear error messages
+- **Iteration Failures**: Falls back to previous good result if available
 
 ### Safety Limits
 
-- Maximum 50 iterations in orchestration loop
-- Prevents infinite loops if coordinator creates circular dependencies
+- Maximum 5 main iterations (worker definition → execution → evaluation cycles)
+- Maximum 50 task execution iterations per main iteration
+- Maximum 5 workers per iteration
+- Prevents infinite loops and runaway costs
 
 ### Dependencies
 
@@ -201,38 +286,50 @@ app.py
 │   └── Agent
 ├── 4. AGENT INSTANCES
 │   ├── create_coordinator_agent()
-│   ├── create_research_worker()
-│   └── create_writer_worker()
+│   └── create_dynamic_agent()          # Creates workers from JSON specs
 ├── 5. COORDINATOR PLANNING & AGGREGATION
+│   ├── define_workers()                # NEW: Defines specialized workers
 │   ├── plan_subtasks()
+│   ├── evaluate_result()               # NEW: Evaluates quality
 │   └── aggregate()
 ├── 6. WORKER EXECUTION
 │   └── execute_task()
 ├── 7. ORCHESTRATOR LOOP
-│   └── run_orchestration()
+│   └── run_orchestration()            # Now with iteration loop
 └── 8. CLI ENTRYPOINT
     ├── print_task_tree()
     └── main()
 ```
 
+## Key Features
+
+✅ **Dynamic Worker Creation**: Coordinator creates specialized agents for each task  
+✅ **Iterative Refinement**: Up to 5 iterations to improve quality  
+✅ **Self-Evaluation**: Coordinator critically assesses its own output  
+✅ **Flexible Architecture**: Adapts to any type of query  
+✅ **Dependency Tracking**: Workers can build on each other's results  
+
 ## Limitations
 
-- **Single planning pass**: Coordinator plans once, no dynamic re-planning
 - **No task graph visualization**: `print_task_tree()` exists but not called by default
 - **Sequential execution**: Tasks run one at a time (no true parallelism)
-- **In-memory only**: Task graph not persisted
+- **In-memory only**: Task graph not persisted between runs
 - **No tool use**: Agents only have text I/O, no external tools
+- **Conservative evaluation**: Coordinator may be overly critical and iterate unnecessarily
 
 ## Future Enhancements
 
 - [ ] Add task graph visualization to CLI output
 - [ ] Implement true parallel task execution (asyncio/threads)
-- [ ] Add tool use for agents (web search, code execution, etc.)
+- [ ] Add tool use for agents (web search, code execution, file I/O, etc.)
 - [ ] Persistent task storage (SQLite, JSON files)
-- [ ] Dynamic re-planning if tasks fail
+- [ ] Worker reuse across iterations (if a worker is still useful)
+- [ ] Human-in-the-loop evaluation (user approves/rejects results)
 - [ ] Token usage tracking and cost estimation
 - [ ] Streaming responses for real-time feedback
 - [ ] Web UI for monitoring task progress
+- [ ] Multi-model support (different models for different workers)
+- [ ] Result caching to avoid redundant work
 
 ## License
 

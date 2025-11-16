@@ -165,22 +165,41 @@ def create_coordinator_agent() -> Agent:
     system_prompt = """You are a Coordinator Agent in a multi-agent system.
 
 Your responsibilities:
-1. PLANNING: Break down complex user requests into subtasks for specialist agents.
-2. AGGREGATION: Synthesize results from workers into a final coherent answer.
+1. WORKER DEFINITION: Analyze the user's request and define specialized worker agents (up to 5) that would be most useful.
+2. PLANNING: Break down complex user requests into subtasks for your defined workers.
+3. EVALUATION: Assess if results adequately satisfy the user's original request.
+4. AGGREGATION: Synthesize results from workers into a final coherent answer.
 
-When planning, you have access to these worker agents:
-- research_worker: Analyzes information, researches topics, extracts insights
-- writer_worker: Writes final polished answers from notes and research
+You have the ability to dynamically create specialized worker agents with custom capabilities.
+Each worker should have a clear role, expertise area, and purpose.
 
-Output JSON ONLY when planning subtasks. Use this exact format:
+When defining workers, output JSON ONLY in this format:
+{
+  "workers": [
+    {
+      "name": "descriptive_name_here",
+      "role": "Brief description of role",
+      "system_prompt": "Detailed instructions for this worker including expertise, responsibilities, and output style"
+    }
+  ]
+}
+
+When planning subtasks, output JSON ONLY in this format:
 {
   "subtasks": [
     {
       "description": "Clear task description",
-      "assigned_agent": "research_worker",
+      "assigned_agent": "worker_name",
       "depends_on": []
     }
   ]
+}
+
+When evaluating results, output JSON ONLY in this format:
+{
+  "satisfactory": true/false,
+  "reasoning": "Explanation of why result does or doesn't meet user's needs",
+  "improvements_needed": "Specific areas that need work (if not satisfactory)"
 }
 
 When aggregating, produce a clear markdown-formatted final answer."""
@@ -188,39 +207,98 @@ When aggregating, produce a clear markdown-formatted final answer."""
     return Agent(name="coordinator", system_prompt=system_prompt)
 
 
-def create_research_worker() -> Agent:
-    """Create the research worker agent."""
-    system_prompt = """You are a Research Worker in a multi-agent system.
-
-Your role:
-- Analyze information and extract insights
-- Research topics in depth
-- Provide detailed findings and notes
-- Break down complex concepts
-
-Be thorough and detailed in your responses. Provide structured information that other agents can build upon."""
+def create_dynamic_agent(worker_def: dict) -> Agent:
+    """Create a worker agent from a dynamic definition.
     
-    return Agent(name="research_worker", system_prompt=system_prompt)
-
-
-def create_writer_worker() -> Agent:
-    """Create the writer worker agent."""
-    system_prompt = """You are a Writer Worker in a multi-agent system.
-
-Your role:
-- Transform research notes into polished final answers
-- Write clear, well-structured content
-- Synthesize information from multiple sources
-- Produce user-ready output
-
-Write in a clear, professional tone. Structure your output with markdown formatting where appropriate."""
+    Args:
+        worker_def: Dict with 'name', 'role', 'system_prompt'
     
-    return Agent(name="writer_worker", system_prompt=system_prompt)
+    Returns:
+        Agent instance
+    """
+    return Agent(
+        name=worker_def["name"],
+        system_prompt=worker_def["system_prompt"]
+    )
 
 
 # ============================================================================
 # 5. COORDINATOR PLANNING & AGGREGATION
 # ============================================================================
+
+def define_workers(
+    root_task: Task,
+    coordinator: Agent,
+    previous_attempt: Optional[str] = None,
+    previous_feedback: Optional[str] = None
+) -> list[dict]:
+    """
+    Use coordinator to define what worker agents would be useful.
+    
+    Args:
+        root_task: The root task
+        coordinator: Coordinator agent
+        previous_attempt: Previous iteration's result (if any)
+        previous_feedback: Feedback on what needs improvement (if any)
+    
+    Returns:
+        List of worker definition dicts
+    """
+    context = f"""WORKER DEFINITION REQUEST
+
+User's goal: {root_task.description}
+"""
+    
+    if previous_attempt:
+        context += f"""
+
+This is iteration {2 if not previous_feedback else 'N'}. Previous attempt did not fully satisfy the user's needs.
+
+Previous result:
+{previous_attempt[:500]}...
+
+Feedback on what needs improvement:
+{previous_feedback}
+"""
+    
+    context += """
+
+Analyze this goal and define 1-5 specialized worker agents that would be most effective.
+Each worker should have a unique expertise area relevant to the task.
+
+Output JSON ONLY in this format:
+{
+  "workers": [
+    {
+      "name": "descriptive_name",
+      "role": "Brief role description",
+      "system_prompt": "Detailed system prompt with expertise, responsibilities, and style guidelines"
+    }
+  ]
+}"""
+    
+    messages = [
+        {"role": "system", "content": coordinator.system_prompt},
+        {"role": "user", "content": context}
+    ]
+    
+    logger.info("Coordinator defining worker agents")
+    
+    try:
+        result = call_llm_json(messages, coordinator.model)
+        workers = result.get("workers", [])
+        
+        if len(workers) > 5:
+            logger.warning(f"Coordinator defined {len(workers)} workers, limiting to 5")
+            workers = workers[:5]
+        
+        logger.info(f"Defined {len(workers)} workers: {[w['name'] for w in workers]}")
+        return workers
+    
+    except Exception as e:
+        logger.error(f"Failed to define workers: {e}")
+        raise
+
 
 def plan_subtasks(
     root_task: Task,
@@ -242,7 +320,7 @@ def plan_subtasks(
     
     # Build context
     worker_descriptions = [
-        f"- {name}: {agent.system_prompt.split('Your role:')[1].split('Be ')[0].strip() if 'Your role:' in agent.system_prompt else 'Worker agent'}"
+        f"- {name}: {agent.system_prompt.split('Your role:')[0] if 'Your role:' in agent.system_prompt else agent.system_prompt[:100]}"
         for name, agent in agents.items()
         if name != "coordinator"
     ]
@@ -313,6 +391,67 @@ Output JSON ONLY in this format:
     except Exception as e:
         logger.error(f"Failed to plan subtasks: {e}")
         raise
+
+
+def evaluate_result(
+    root_task: Task,
+    result: str,
+    coordinator: Agent
+) -> tuple[bool, str, str]:
+    """
+    Use coordinator to evaluate if result satisfies user's needs.
+    
+    Args:
+        root_task: The root task
+        result: The current result
+        coordinator: Coordinator agent
+    
+    Returns:
+        Tuple of (is_satisfactory, reasoning, improvements_needed)
+    """
+    context = f"""EVALUATION REQUEST
+
+Original user goal: {root_task.description}
+
+Current result:
+{result}
+
+Evaluate whether this result fully and adequately satisfies the user's original goal.
+Be critical and thorough. Consider:
+- Does it fully address all aspects of the request?
+- Is it sufficiently detailed and accurate?
+- Is the quality high enough?
+- Are there any gaps or weaknesses?
+
+Output JSON ONLY in this format:
+{{
+  "satisfactory": true/false,
+  "reasoning": "Detailed explanation",
+  "improvements_needed": "Specific areas to improve (if not satisfactory)"
+}}"""
+    
+    messages = [
+        {"role": "system", "content": coordinator.system_prompt},
+        {"role": "user", "content": context}
+    ]
+    
+    logger.info("Coordinator evaluating result quality")
+    
+    try:
+        evaluation = call_llm_json(messages, coordinator.model)
+        is_satisfactory = evaluation.get("satisfactory", False)
+        reasoning = evaluation.get("reasoning", "No reasoning provided")
+        improvements = evaluation.get("improvements_needed", "")
+        
+        logger.info(f"Evaluation: {'✓ Satisfactory' if is_satisfactory else '✗ Needs improvement'}")
+        logger.debug(f"Reasoning: {reasoning}")
+        
+        return is_satisfactory, reasoning, improvements
+    
+    except Exception as e:
+        logger.error(f"Failed to evaluate result: {e}")
+        # Default to accepting result if evaluation fails
+        return True, "Evaluation failed, accepting result", ""
 
 
 def aggregate(root_task: Task, tasks: dict[str, Task], coordinator: Agent) -> str:
@@ -424,7 +563,7 @@ def execute_task(task: Task, agent: Agent, tasks: dict[str, Task]) -> None:
 
 def run_orchestration(root_description: str) -> str:
     """
-    Main orchestration loop.
+    Main orchestration loop with dynamic worker creation and iterative improvement.
     
     Args:
         root_description: User's input goal
@@ -434,13 +573,8 @@ def run_orchestration(root_description: str) -> str:
     """
     logger.info(f"Starting orchestration for: '{root_description}'")
     
-    # Initialize
-    tasks: dict[str, Task] = {}
-    agents = {
-        "coordinator": create_coordinator_agent(),
-        "research_worker": create_research_worker(),
-        "writer_worker": create_writer_worker()
-    }
+    # Create coordinator
+    coordinator = create_coordinator_agent()
     
     # Create root task
     root_id = str(uuid.uuid4())
@@ -451,69 +585,142 @@ def run_orchestration(root_description: str) -> str:
         assigned_agent="coordinator",
         status="PENDING"
     )
-    tasks[root_id] = root_task
     
-    # Plan subtasks
-    try:
-        subtasks = plan_subtasks(root_task, tasks, agents)
-        logger.info(f"Planned {len(subtasks)} subtasks")
-    except Exception as e:
-        logger.error(f"Planning failed: {e}")
-        return f"Failed to plan tasks: {e}"
+    # Iteration state
+    max_main_iterations = 5
+    previous_result = None
+    previous_feedback = None
+    final_answer = ""
     
-    # Execution loop
-    max_iterations = 50  # Safety limit
-    iteration = 0
-    
-    while iteration < max_iterations:
-        iteration += 1
+    for main_iteration in range(1, max_main_iterations + 1):
+        logger.info(f"\n{'='*80}")
+        logger.info(f"ITERATION {main_iteration}/{max_main_iterations}")
+        logger.info(f"{'='*80}\n")
         
-        # Find ready tasks (PENDING with all dependencies DONE)
-        ready_tasks = []
-        for task in tasks.values():
-            if task.status == "PENDING" and task.assigned_agent != "coordinator":
-                # Check if all dependencies are done
-                deps_ready = all(
-                    tasks.get(dep_id, {}).status == "DONE"
-                    for dep_id in task.depends_on
-                ) if task.depends_on else True
+        # 1. Define workers for this iteration
+        try:
+            worker_defs = define_workers(
+                root_task,
+                coordinator,
+                previous_attempt=previous_result,
+                previous_feedback=previous_feedback
+            )
+        except Exception as e:
+            logger.error(f"Worker definition failed: {e}")
+            if previous_result:
+                return previous_result  # Return last good result
+            return f"Failed to define workers: {e}"
+        
+        # 2. Create agents dynamically
+        agents = {"coordinator": coordinator}
+        for worker_def in worker_defs:
+            try:
+                agent = create_dynamic_agent(worker_def)
+                agents[agent.name] = agent
+                logger.info(f"Created agent: {agent.name} - {worker_def.get('role', 'No role specified')}")
+            except Exception as e:
+                logger.error(f"Failed to create agent from def {worker_def}: {e}")
+        
+        # 3. Initialize tasks for this iteration
+        tasks: dict[str, Task] = {root_id: root_task}
+        
+        # 4. Plan subtasks
+        try:
+            subtasks = plan_subtasks(root_task, tasks, agents)
+            logger.info(f"Planned {len(subtasks)} subtasks")
+        except Exception as e:
+            logger.error(f"Planning failed: {e}")
+            if previous_result:
+                return previous_result
+            return f"Failed to plan tasks: {e}"
+        
+        # 5. Execution loop
+        max_exec_iterations = 50  # Safety limit
+        exec_iteration = 0
+        
+        while exec_iteration < max_exec_iterations:
+            exec_iteration += 1
+            
+            # Find ready tasks (PENDING with all dependencies DONE)
+            ready_tasks = []
+            for task in tasks.values():
+                if task.status == "PENDING" and task.assigned_agent != "coordinator":
+                    # Check if all dependencies are done
+                    deps_ready = all(
+                        tasks.get(dep_id, {}).status == "DONE"
+                        for dep_id in task.depends_on
+                    ) if task.depends_on else True
+                    
+                    if deps_ready:
+                        ready_tasks.append(task)
+            
+            if not ready_tasks:
+                # Check if any tasks are still running
+                running = [t for t in tasks.values() if t.status == "RUNNING"]
+                pending = [t for t in tasks.values() if t.status == "PENDING" and t.assigned_agent != "coordinator"]
                 
-                if deps_ready:
-                    ready_tasks.append(task)
-        
-        if not ready_tasks:
-            # Check if any tasks are still running
-            running = [t for t in tasks.values() if t.status == "RUNNING"]
-            pending = [t for t in tasks.values() if t.status == "PENDING" and t.assigned_agent != "coordinator"]
+                if not running and not pending:
+                    logger.info("All tasks completed")
+                    break
+                else:
+                    logger.warning(f"No ready tasks but {len(running)} running, {len(pending)} pending")
+                    break
             
-            if not running and not pending:
-                logger.info("All tasks completed, breaking execution loop")
-                break
-            else:
-                logger.warning(f"No ready tasks but {len(running)} running, {len(pending)} pending")
-                break
+            # Execute ready tasks
+            for task in ready_tasks:
+                agent = agents.get(task.assigned_agent)
+                if not agent:
+                    logger.error(f"Unknown agent: {task.assigned_agent}")
+                    task.status = "FAILED"
+                    task.output = f"Unknown agent: {task.assigned_agent}"
+                    continue
+                
+                execute_task(task, agent, tasks)
         
-        # Execute ready tasks
-        for task in ready_tasks:
-            agent = agents.get(task.assigned_agent)
-            if not agent:
-                logger.error(f"Unknown agent: {task.assigned_agent}")
-                task.status = "FAILED"
-                task.output = f"Unknown agent: {task.assigned_agent}"
-                continue
+        # 6. Aggregate results
+        logger.info("Aggregating results")
+        try:
+            final_answer = aggregate(root_task, tasks, coordinator)
+            root_task.status = "DONE"
+            root_task.output = final_answer
+        except Exception as e:
+            logger.error(f"Aggregation failed: {e}")
+            if previous_result:
+                return previous_result
+            return f"Failed to aggregate results: {e}"
+        
+        # 7. Evaluate result
+        is_satisfactory, reasoning, improvements_needed = evaluate_result(
+            root_task,
+            final_answer,
+            coordinator
+        )
+        
+        if is_satisfactory:
+            logger.info(f"\n✅ Result satisfactory after {main_iteration} iteration(s)")
+            logger.info(f"Reasoning: {reasoning}")
+            return final_answer
+        else:
+            logger.info(f"\n⚠️  Result needs improvement")
+            logger.info(f"Reasoning: {reasoning}")
+            logger.info(f"Improvements needed: {improvements_needed}")
             
-            execute_task(task, agent, tasks)
+            if main_iteration == max_main_iterations:
+                logger.warning(f"Reached max iterations ({max_main_iterations}), returning current result")
+                return final_answer
+            
+            # Prepare for next iteration
+            previous_result = final_answer
+            previous_feedback = improvements_needed
+            
+            # Clear tasks for next iteration (keep root task)
+            for task_id in list(tasks.keys()):
+                if task_id != root_id:
+                    del tasks[task_id]
+            
+            root_task.status = "PENDING"  # Reset for next iteration
     
-    # Aggregate results
-    logger.info("Aggregating final results")
-    try:
-        final_answer = aggregate(root_task, tasks, agents["coordinator"])
-        root_task.status = "DONE"
-        root_task.output = final_answer
-        return final_answer
-    except Exception as e:
-        logger.error(f"Aggregation failed: {e}")
-        return f"Failed to aggregate results: {e}"
+    return final_answer
 
 
 # ============================================================================
